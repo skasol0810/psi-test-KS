@@ -808,14 +808,14 @@ function renderTodayNeedPanel(panel) {
     tableWrap.innerHTML = `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>구분</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th><th>합산 조치량<br><span style="font-weight:400;font-size:11px;color:#888;">(오늘+내일 예상)</span></th></tr></thead>
+        <thead><tr><th>구분</th><th>협력사</th><th style="text-align:center;">긴급여부</th><th>품번</th><th>품명</th><th>현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th><th>합산 조치량<br><span style="font-weight:400;font-size:11px;color:#888;">(오늘+내일 예상)</span></th></tr></thead>
         <tbody class="need-tbody"></tbody>
       </table>
       </div>`;
     const tbody = tableWrap.querySelector('.need-tbody');
     if (filtered.length === 0) {
       const msg = rows.length === 0 ? `${dateStr} 기준으로 입고가 필요한 품목이 없습니다 👍` : '검색/필터 조건에 맞는 품목이 없습니다.';
-      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:#888;padding:24px;">${msg}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="9" style="text-align:center;color:#888;padding:24px;">${msg}</td></tr>`;
       return;
     }
     filtered.forEach(r => {
@@ -824,10 +824,10 @@ function renderTodayNeedPanel(panel) {
       const tr = document.createElement('tr');
       if (r.urgent) tr.style.background = '#fdecea';
       const badge = r.urgent
-        ? ' <span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:999px;background:#e74c3c;color:#fff;font-size:11px;font-weight:600;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
+        ? '<span style="display:inline-block;padding:2px 10px;border-radius:999px;background:#e74c3c;color:#fff;font-size:11px;font-weight:600;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
         : '';
       tr.innerHTML = `
-        <td>${escapeHtml(r.category)}</td><td>${escapeHtml(i.supplier)}${badge}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
+        <td>${escapeHtml(r.category)}</td><td>${escapeHtml(i.supplier)}</td><td style="text-align:center;">${badge}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
         <td class="${stockClass(i.today_shortage)}">${stockLabel(i.today_shortage)}</td>
         <td class="${deadlineClass}">${inputDeadlineLabel(i)}</td>
         <td class="shortage">${Math.round(r.need).toLocaleString()}개</td>
@@ -958,11 +958,17 @@ function renderAsmPanel(panel, data, categoryKey) {
   const excessCount = data.items.filter(i => statusOf(i) === 'excess').length;
   const unknownCount = data.items.filter(i => statusOf(i) === 'unknown').length;
   const discontinuedCount = showDiscontinued ? data.items.filter(i => statusOf(i) === 'discontinued').length : 0;
+  // '현재 부족' 중에서도, 기본 세팅값(전일 입고 → 당일 소진) 기준으로 전일에
+  // 입고가 없었던(=예정된 입고가 실제로 안 들어와서 생긴) 경우만 따로 '긴급'으로
+  // 셉니다. '날짜별 입고 필요' 탭과 완전히 같은 기준(isTodayUrgent)을 씁니다.
+  const todayForUrgent = todayStr();
+  const urgentCount = data.items.filter(i => statusOf(i) === 'danger' && isTodayUrgent(i, todayForUrgent)).length;
   panel.innerHTML = `
     ${staleSourceBannerHtml(data)}
     <div class="stat-row">
       <div class="stat"><div class="num">${data.items.length}</div><div class="label">전체 품목</div></div>
       <div class="stat stat-clickable" data-status="danger" style="cursor:pointer; background:#fdecea;"><div class="num" style="color:#e74c3c">${dangerCount}</div><div class="label">현재 부족</div></div>
+      <div class="stat stat-clickable" data-status="urgent" style="cursor:pointer; background:#fdecea; border:1px solid #f0b8b3;"><div class="num" style="color:#e74c3c">${urgentCount}</div><div class="label">⚠ 긴급 (당일 미입고)</div></div>
       <div class="stat stat-clickable" data-status="warning" style="cursor:pointer;"><div class="num" style="color:#e0982a">${warningCount}</div><div class="label">임박 (${SOON_THRESHOLD_DAYS}일 이내)</div></div>
       <div class="stat stat-clickable" data-status="safe" style="cursor:pointer;"><div class="num" style="color:#2ecc71">${safeCount}</div><div class="label">적정</div></div>
       <div class="stat stat-clickable" data-status="excess" style="cursor:pointer; background:#eaf3fb;"><div class="num" style="color:#2980b9">${excessCount}</div><div class="label">과잉 (기본 ${EXCESS_THRESHOLD_DAYS}일 초과, 품번별 설정 시 다를 수 있음)</div></div>
@@ -976,6 +982,7 @@ function renderAsmPanel(panel, data, categoryKey) {
       <select class="asm-status">
         <option value="">전체 상태 (임박한 순 정렬)</option>
         <option value="danger">현재 부족만 보기</option>
+        <option value="urgent">⚠ 긴급(당일 미입고)만 보기</option>
         <option value="warning">임박만 보기</option>
         <option value="safe">적정만 보기</option>
         <option value="excess">과잉만 보기</option>
@@ -1036,7 +1043,11 @@ function renderAsmPanel(panel, data, categoryKey) {
     return data.items
       .filter(i => !sup || i.supplier === sup)
       .filter(i => !q || String(i.name||'').toLowerCase().includes(q) || String(i.pno||'').toLowerCase().includes(q) || String(i.supplier||'').toLowerCase().includes(q))
-      .filter(i => !status || statusOf(i) === status)
+      // 'urgent'는 실제 statusOf() 값이 아니라, '현재 부족(danger)' 중에서도
+      // 전일 입고가 없었던 경우만 추리는 별도 필터입니다.
+      .filter(i => !status || (status === 'urgent'
+        ? (statusOf(i) === 'danger' && isTodayUrgent(i, todayStr()))
+        : statusOf(i) === status))
       .sort(compareBy(sortMode));
   }
 
@@ -1089,16 +1100,23 @@ function renderAsmPanel(panel, data, categoryKey) {
         const statClass = st === 'danger' ? 'shortage' : st === 'warning' ? 'warn' : st === 'excess' ? 'excess' : st === 'unknown' ? 'unknown' : st === 'discontinued' ? 'discontinued' : 'ok';
         const dday = inputDeadlineLabel(i);
         const needQty = i.required_qty != null ? `${Math.round(i.required_qty).toLocaleString()}개` : '-';
+        // '현재 부족(danger)' 중에서도 전일 입고가 없었던 경우만 '긴급'으로
+        // 별도 강조합니다. '날짜별 입고 필요' 탭과 완전히 같은 기준입니다.
+        const isUrgent = st === 'danger' && isTodayUrgent(i, todayStr());
         const tr = document.createElement('tr');
+        if (isUrgent) tr.style.background = '#fdecea';
         const pnoStr = String(i.pno ?? '');
         const isChecked = adminSelection.has(pnoStr);
+        const urgentBadge = isUrgent
+          ? '<span class="badge danger" style="background:#e74c3c;color:#fff;margin-left:4px;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
+          : '';
         tr.innerHTML = `
           <td class="admin-col" onclick="event.stopPropagation()"><input type="checkbox" class="admin-hide-chk" data-pno="${escapeHtml(pnoStr)}" ${isChecked ? 'checked' : ''}></td>
           <td>${escapeHtml(i.supplier)}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
           <td class="${stockClass(i.today_shortage)}">${stockLabel(i.today_shortage)}</td>
           <td class="${statClass}">${dday}</td>
           <td class="${statClass}">${needQty}</td>
-          <td><span class="badge ${st === 'danger' ? 'danger' : st === 'warning' ? 'warning' : st === 'excess' ? 'excess' : st === 'unknown' ? 'unknown' : st === 'discontinued' ? 'discontinued' : 'safe'}">${statLabel}</span></td>`;
+          <td><span class="badge ${st === 'danger' ? 'danger' : st === 'warning' ? 'warning' : st === 'excess' ? 'excess' : st === 'unknown' ? 'unknown' : st === 'discontinued' ? 'discontinued' : 'safe'}">${statLabel}</span>${urgentBadge}</td>`;
         tr.onclick = () => {
           panel.querySelector('.chart-wrap').style.display = 'block';
           panel.querySelector('.chart-title').textContent = `${i.supplier} · ${i.name} (${i.pno}) 추이`;
