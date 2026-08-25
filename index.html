@@ -96,6 +96,14 @@
     th, td { padding:8px 10px; font-size:12px; }
     #globalSupplierSearch { font-size:14px !important; padding:10px 12px !important; }
   }
+  .admin-col { display:none; }
+  body.admin-mode .admin-col { display:table-cell; }
+  #adminBar { display:flex; align-items:center; gap:10px; flex-wrap:wrap; margin-bottom:10px; padding:10px 14px; border-radius:8px; background:#fdf6e3; border:1px solid #e8d9a0; font-size:13px; }
+  #adminBar.on { background:#fdecea; border-color:#f0b8b3; }
+  #adminModeBtn { padding:6px 12px; border-radius:6px; border:1px solid #999; background:#fff; cursor:pointer; font-weight:600; font-size:12px; }
+  #adminModeBtn.on { background:#e74c3c; color:#fff; border-color:#e74c3c; }
+  #adminCopyBtn { padding:6px 12px; border-radius:6px; border:1px solid #4a6cf7; background:#4a6cf7; color:#fff; cursor:pointer; font-weight:600; font-size:12px; }
+  #adminResetBtn { padding:6px 12px; border-radius:6px; border:1px solid #ddd; background:#fff; cursor:pointer; font-size:12px; }
 </style>
 </head>
 <body>
@@ -108,6 +116,16 @@
 
   <div class="toolbar" style="margin-bottom:8px;">
     <input id="globalSupplierSearch" placeholder="🔍 협력사 이름으로 전체 탭 검색 (예: 동은테크)" style="flex:1; min-width:280px; font-size:15px; padding:10px 14px;">
+  </div>
+
+  <div id="adminBar">
+    <button id="adminModeBtn" type="button">🔒 관리자 모드 (품번 숨기기)</button>
+    <span id="adminStatusText" style="display:none; color:#555;">
+      각 탭 '목록으로 보기'에서 체크박스로 숨길 품번을 선택하세요. (기존 숨김: <span id="adminExistingCount">0</span>개 · 새로 선택: <span id="adminSelectedCount">0</span>개)
+    </span>
+    <button id="adminCopyBtn" type="button" style="display:none;">📋 숨김 목록(JSON) 복사</button>
+    <button id="adminResetBtn" type="button" style="display:none;">선택 초기화</button>
+    <span id="adminCopyMsg" style="font-size:12px; color:#2ecc71; font-weight:600;"></span>
   </div>
 
   <div class="tabs" id="tabButtons"></div>
@@ -125,6 +143,12 @@ const CASE = {"generated_at": "2026-08-25T16:28:30.020099", "suppliers": ["금�
 // 선언)을 씁니다. 나중에 리드타임 데이터가 들어오면 이 파일만 채우면 되고,
 // 지금처럼 파일이 비어있거나 없어도 기존 방식(전체 공통 기준)과 똑같이 동작합니다.
 const EXCESS_THRESHOLDS = {};
+
+// 이미 hidden_pnos.json으로 걸러진(=이 화면에 아예 안 실린) 품번 목록입니다.
+// 실제 필터링은 파이썬 단계(build_dashboard_all.py)에서 이미 끝났고, 여기서는
+// 관리자 모드에서 '기존 숨김 몇 건' 안내와, 새로 선택한 품번과 합쳐서
+// hidden_pnos.json에 붙여넣을 최종 목록을 만드는 용도로만 씁니다.
+const HIDDEN_PNOS = [];
 
 // 사내생산(협력사에 발주할 필요가 없는 내부 생산 품목)은 대시보드에서 제외.
 // items와 suppliers 목록(드롭다운/검색용) 둘 다에서 제거해야 어디서도 안 보임.
@@ -493,6 +517,97 @@ function switchTab(key) {
   [...tabButtons.children].find((b,i) => SHEETS[i].key === key).classList.add('active');
   document.getElementById('panel-' + key).classList.add('active');
 }
+
+// ---------- 관리자 모드: 체크박스로 품번 숨기기 ----------
+// 실제로 화면에서 사라지게 하려면 결국 hidden_pnos.json 파일을 고쳐서
+// build_dashboard_all.py를 다시 실행해야 합니다(이 대시보드는 완전히
+// 정적인 HTML이라 서버에 즉시 저장할 방법이 없습니다). 그래서 이 기능은
+// "숨기고 싶은 품번을 체크 → hidden_pnos.json에 붙여넣을 최종 목록을
+// 만들어 클립보드로 복사"까지만 해줍니다. 체크한 목록은 이 브라우저의
+// localStorage에 저장되므로, 다른 사람 화면에는 영향이 없고 새로고침해도
+// 유지됩니다(파일에 실제로 반영하기 전까지의 임시 작업 목록).
+const ADMIN_SELECTION_KEY = 'psiAdminHiddenSelection';
+const ADMIN_MODE_KEY = 'psiAdminModeOn';
+let adminSelection = new Set();
+try {
+  adminSelection = new Set(JSON.parse(localStorage.getItem(ADMIN_SELECTION_KEY) || '[]'));
+} catch (e) { adminSelection = new Set(); }
+
+const adminBar = document.getElementById('adminBar');
+const adminModeBtn = document.getElementById('adminModeBtn');
+const adminStatusText = document.getElementById('adminStatusText');
+const adminCopyBtn = document.getElementById('adminCopyBtn');
+const adminResetBtn = document.getElementById('adminResetBtn');
+const adminCopyMsg = document.getElementById('adminCopyMsg');
+const adminExistingCountEl = document.getElementById('adminExistingCount');
+const adminSelectedCountEl = document.getElementById('adminSelectedCount');
+
+function saveAdminSelection() {
+  localStorage.setItem(ADMIN_SELECTION_KEY, JSON.stringify([...adminSelection]));
+  updateAdminBarUI();
+}
+
+function updateAdminBarUI() {
+  const isOn = document.body.classList.contains('admin-mode');
+  adminBar.classList.toggle('on', isOn);
+  adminModeBtn.classList.toggle('on', isOn);
+  adminModeBtn.textContent = isOn ? '🔓 관리자 모드 끄기' : '🔒 관리자 모드 (품번 숨기기)';
+  adminStatusText.style.display = isOn ? '' : 'none';
+  adminCopyBtn.style.display = isOn ? '' : 'none';
+  adminResetBtn.style.display = isOn ? '' : 'none';
+  adminExistingCountEl.textContent = HIDDEN_PNOS.length;
+  adminSelectedCountEl.textContent = adminSelection.size;
+}
+
+function setAdminMode(on) {
+  document.body.classList.toggle('admin-mode', on);
+  localStorage.setItem(ADMIN_MODE_KEY, on ? '1' : '0');
+  updateAdminBarUI();
+  // 관리자 모드를 껐다 켰을 때 각 탭의 체크박스 상태를 다시 반영
+  document.querySelectorAll('.admin-hide-chk').forEach(chk => {
+    chk.checked = adminSelection.has(chk.getAttribute('data-pno'));
+  });
+}
+
+adminModeBtn.addEventListener('click', () => setAdminMode(!document.body.classList.contains('admin-mode')));
+
+adminResetBtn.addEventListener('click', () => {
+  if (!confirm('선택한 품번 목록을 초기화할까요? (이미 hidden_pnos.json에 반영된 기존 숨김 목록에는 영향 없습니다)')) return;
+  adminSelection.clear();
+  saveAdminSelection();
+  document.querySelectorAll('.admin-hide-chk').forEach(chk => { chk.checked = false; });
+  adminCopyMsg.textContent = '';
+});
+
+adminCopyBtn.addEventListener('click', async () => {
+  const merged = [...new Set([...HIDDEN_PNOS, ...adminSelection])].sort();
+  const text = JSON.stringify(merged, null, 2);
+  try {
+    await navigator.clipboard.writeText(text);
+    adminCopyMsg.textContent = `✅ ${merged.length}개 품번 목록이 복사됐어요. hidden_pnos.json에 붙여넣고 다시 빌드+배포해주세요.`;
+  } catch (e) {
+    adminCopyMsg.textContent = '⚠ 클립보드 복사에 실패했어요. 아래 내용을 직접 복사해주세요:';
+    window.prompt('아래 내용을 복사해서 hidden_pnos.json에 붙여넣으세요:', text);
+  }
+  setTimeout(() => { adminCopyMsg.textContent = ''; }, 8000);
+});
+
+// 체크박스는 각 탭이 렌더링될 때마다 새로 만들어지므로, 이벤트를 document에
+// 위임해서(event delegation) 탭이 몇 번을 다시 그려도 항상 동작하게 합니다.
+document.addEventListener('click', (e) => {
+  if (e.target.classList && e.target.classList.contains('admin-hide-chk')) {
+    e.stopPropagation(); // 체크박스를 눌렀을 때 그 행의 차트 열기(row onclick)가 같이 실행되지 않도록
+  }
+}, true);
+document.addEventListener('change', (e) => {
+  if (e.target.classList && e.target.classList.contains('admin-hide-chk')) {
+    const pno = e.target.getAttribute('data-pno');
+    if (e.target.checked) adminSelection.add(pno); else adminSelection.delete(pno);
+    saveAdminSelection();
+  }
+});
+
+setAdminMode(localStorage.getItem(ADMIN_MODE_KEY) === '1');
 
 // 상단 전역 협력사 검색: 입력하면 모든 탭의 검색창에 동시에 반영되어 전부 같이 필터링됨
 const globalSearch = document.getElementById('globalSupplierSearch');
@@ -883,7 +998,7 @@ function renderAsmPanel(panel, data, categoryKey) {
     </div>
     <div class="table-scroll">
     <table>
-      <thead><tr><th>협력사</th><th>품번</th><th>품명</th><th>현재재고</th><th>입고 기한</th><th>필요 입고수량</th><th>상태</th></tr></thead>
+      <thead><tr><th class="admin-col" title="관리자 모드에서만 보입니다">숨김</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고</th><th>입고 기한</th><th>필요 입고수량</th><th>상태</th></tr></thead>
       <tbody class="asm-tbody"></tbody>
     </table>
     </div>
@@ -975,7 +1090,10 @@ function renderAsmPanel(panel, data, categoryKey) {
         const dday = inputDeadlineLabel(i);
         const needQty = i.required_qty != null ? `${Math.round(i.required_qty).toLocaleString()}개` : '-';
         const tr = document.createElement('tr');
+        const pnoStr = String(i.pno ?? '');
+        const isChecked = adminSelection.has(pnoStr);
         tr.innerHTML = `
+          <td class="admin-col" onclick="event.stopPropagation()"><input type="checkbox" class="admin-hide-chk" data-pno="${escapeHtml(pnoStr)}" ${isChecked ? 'checked' : ''}></td>
           <td>${escapeHtml(i.supplier)}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
           <td class="${stockClass(i.today_shortage)}">${stockLabel(i.today_shortage)}</td>
           <td class="${statClass}">${dday}</td>
