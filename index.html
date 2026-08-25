@@ -536,6 +536,23 @@ function valueOnDate(series, dateStr) {
   return picked ? picked.과부족 : null;
 }
 
+// 과부족과 달리 입고수량은 '그 날짜에 실제로 입고됐는지'를 봐야 하므로,
+// 이전 값으로 채우지 않고 그 날짜와 정확히 일치하는 값만 확인합니다.
+// 값이 없거나(null) 0이면 '그날 입고가 없었다'는 뜻입니다.
+function inboundOnDate(series, dateStr) {
+  const found = (series || []).find(s => s.date === dateStr);
+  return found ? found.입고수량 : null;
+}
+
+// 기본 세팅값(전일 입고 → 당일 소진) 기준으로, 오늘 부족이 발생했는데
+// 전일 입고가 없었던(=예정된 입고가 실제로 안 들어온) 경우를 '긴급'으로 봅니다.
+// 단순히 과부족이 마이너스인 것과는 다른, "입고 스케줄 자체가 깨진" 상황입니다.
+function isTodayUrgent(item, dateStr) {
+  const yesterday = addDays(dateStr, -1);
+  const inbound = inboundOnDate(item.series, yesterday);
+  return inbound == null || inbound === 0;
+}
+
 function allSuppliersAcross() {
   const set = new Set([...(ASM.suppliers||[]), ...(CAPCOVER.suppliers||[]), ...(STACKING.suppliers||[])]);
   return [...set].sort();
@@ -554,11 +571,23 @@ function buildNeedItemsForDate(dateStr, selectedCategories) {
     (src.data.items || []).forEach(i => {
       const v = valueOnDate(i.series, dateStr);
       if (v != null && v < 0) {
-        rows.push({ category: src.category, need: Math.abs(v), item: i });
+        // 내일도 부족이 이어질 것으로 예상되면(과부족이 여전히 마이너스),
+        // 오늘 조치해야 할 총량에 내일 예상 부족분까지 더해 보여줍니다.
+        // (전일 입고 → 당일 소진 구조라, 오늘 입고분이 곧 내일 소진에 쓰이기 때문)
+        const tomorrowV = valueOnDate(i.series, addDays(dateStr, 1));
+        const tomorrowNeed = (tomorrowV != null && tomorrowV < 0) ? Math.abs(tomorrowV) : 0;
+        rows.push({
+          category: src.category,
+          need: Math.abs(v),
+          tomorrowNeed,
+          actionQty: Math.abs(v) + tomorrowNeed,
+          urgent: isTodayUrgent(i, dateStr),
+          item: i,
+        });
       }
     });
   });
-  rows.sort((a, b) => b.need - a.need);
+  rows.sort((a, b) => b.actionQty - a.actionQty);
   return rows;
 }
 
@@ -569,6 +598,7 @@ function renderTodayNeedPanel(panel) {
   panel.innerHTML = `
     <div class="stat-row">
       <div class="stat"><div class="num shortage need-count">0</div><div class="label need-count-label">해당 날짜 입고 필요 품목</div></div>
+      <div class="stat" style="background:#fdecea;"><div class="num need-urgent" style="color:#e74c3c;">0</div><div class="label">긴급 (당일 미입고)</div></div>
       <div class="stat"><div class="num shortage need-total">0</div><div class="label need-total-label">필요 수량 합계</div></div>
       <div class="stat"><div class="num need-suppliers">0</div><div class="label">관련 협력사 수</div></div>
     </div>
@@ -652,8 +682,10 @@ function renderTodayNeedPanel(panel) {
     // 필터링 전(rows) 기준으로 계산하면, 예를 들어 특정 협력사만 검색했는데도
     // 요약 숫자는 전체 협력사 합계로 나와서 헷갈리는 문제가 있었습니다.
     const totalNeed = filtered.reduce((sum, r) => sum + r.need, 0);
+    const urgentRows = filtered.filter(r => r.urgent);
     panel.querySelector('.need-count').textContent = filtered.length;
     panel.querySelector('.need-count-label').textContent = '해당 날짜 입고 필요 품목';
+    panel.querySelector('.need-urgent').textContent = urgentRows.length;
     panel.querySelector('.need-total').textContent = Math.round(totalNeed).toLocaleString();
     panel.querySelector('.need-total-label').textContent = '필요 수량 합계';
     panel.querySelector('.need-suppliers').textContent = new Set(filtered.map(r => r.item.supplier)).size;
@@ -661,25 +693,30 @@ function renderTodayNeedPanel(panel) {
     tableWrap.innerHTML = `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>구분</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th></tr></thead>
+        <thead><tr><th>구분</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th><th>합산 조치량<br><span style="font-weight:400;font-size:11px;color:#888;">(오늘+내일 예상)</span></th></tr></thead>
         <tbody class="need-tbody"></tbody>
       </table>
       </div>`;
     const tbody = tableWrap.querySelector('.need-tbody');
     if (filtered.length === 0) {
       const msg = rows.length === 0 ? `${dateStr} 기준으로 입고가 필요한 품목이 없습니다 👍` : '검색/필터 조건에 맞는 품목이 없습니다.';
-      tbody.innerHTML = `<tr><td colspan="7" style="text-align:center;color:#888;padding:24px;">${msg}</td></tr>`;
+      tbody.innerHTML = `<tr><td colspan="8" style="text-align:center;color:#888;padding:24px;">${msg}</td></tr>`;
       return;
     }
     filtered.forEach(r => {
       const i = r.item;
       const deadlineClass = (i.days_until_input != null && i.days_until_input <= 0) ? 'shortage' : (i.days_until_input != null && i.days_until_input <= SOON_THRESHOLD_DAYS ? 'warn' : '');
       const tr = document.createElement('tr');
+      if (r.urgent) tr.style.background = '#fdecea';
+      const badge = r.urgent
+        ? ' <span style="display:inline-block;margin-left:6px;padding:2px 8px;border-radius:999px;background:#e74c3c;color:#fff;font-size:11px;font-weight:600;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
+        : '';
       tr.innerHTML = `
-        <td>${escapeHtml(r.category)}</td><td>${escapeHtml(i.supplier)}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
+        <td>${escapeHtml(r.category)}</td><td>${escapeHtml(i.supplier)}${badge}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
         <td class="${stockClass(i.today_shortage)}">${stockLabel(i.today_shortage)}</td>
         <td class="${deadlineClass}">${inputDeadlineLabel(i)}</td>
-        <td class="shortage">${Math.round(r.need).toLocaleString()}개</td>`;
+        <td class="shortage">${Math.round(r.need).toLocaleString()}개</td>
+        <td class="shortage" style="font-weight:600;">${Math.round(r.actionQty).toLocaleString()}개</td>`;
       attachRowClick(tr, i);
       tbody.appendChild(tr);
     });
@@ -709,6 +746,7 @@ function renderTodayNeedPanel(panel) {
 
     panel.querySelector('.need-count').textContent = rows.length;
     panel.querySelector('.need-count-label').textContent = '앞으로 입고 필요 예정 품목';
+    panel.querySelector('.need-urgent').textContent = '-';
     panel.querySelector('.need-total').textContent = Math.round(rows.reduce((s,r)=>s+(r.need||0),0)).toLocaleString();
     panel.querySelector('.need-total-label').textContent = '필요 수량 합계 (전체 기간)';
     panel.querySelector('.need-suppliers').textContent = new Set(rows.map(r => r.item.supplier)).size;
