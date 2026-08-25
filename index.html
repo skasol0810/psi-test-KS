@@ -118,15 +118,15 @@
     <input id="globalSupplierSearch" placeholder="🔍 협력사 이름으로 전체 탭 검색 (예: 동은테크)" style="flex:1; min-width:280px; font-size:15px; padding:10px 14px;">
   </div>
 
-  <div id="adminBar">
+  <div id="adminBar" style="display:none;">
     <button id="adminModeBtn" type="button">🔒 관리자 모드 (품번 숨기기)</button>
     <span id="adminStatusText" style="display:none; color:#555;">
-      각 탭 '목록으로 보기'에서 체크박스로 숨길 품번을 선택하세요. (기존 숨김: <span id="adminExistingCount">0</span>개 · 새로 선택: <span id="adminSelectedCount">0</span>개)
+      체크하면 <b>즉시 관리자·협력사 화면 모두</b>에서 그 품번이 사라집니다 (GitHub Pages 반영까지 1~2분 정도 걸릴 수 있어요).
     </span>
-    <button id="adminCopyBtn" type="button" style="display:none;">📋 숨김 목록(JSON) 복사</button>
-    <button id="adminResetBtn" type="button" style="display:none;">선택 초기화</button>
-    <span id="adminCopyMsg" style="font-size:12px; color:#2ecc71; font-weight:600;"></span>
+    <span id="adminProcessingMsg" style="font-size:12px; font-weight:600;"></span>
+    <button id="adminHiddenListBtn" type="button" style="display:none;">현재 숨겨진 품번 (<span id="adminHiddenCount">0</span>개) 보기</button>
   </div>
+  <div id="adminHiddenListPanel" style="display:none; margin-bottom:10px; padding:10px 14px; border-radius:8px; background:#fff; border:1px solid #ddd; font-size:13px;"></div>
 
   <div class="tabs" id="tabButtons"></div>
   <div id="tabPanels"></div>
@@ -148,7 +148,7 @@ const EXCESS_THRESHOLDS = {};
 // 실제 필터링은 파이썬 단계(build_dashboard_all.py)에서 이미 끝났고, 여기서는
 // 관리자 모드에서 '기존 숨김 몇 건' 안내와, 새로 선택한 품번과 합쳐서
 // hidden_pnos.json에 붙여넣을 최종 목록을 만드는 용도로만 씁니다.
-const HIDDEN_PNOS = ["MBL64820201"];
+const HIDDEN_PNOS = [{"pno": "?????123", "reason": "???? ??", "hidden_at": "2026-08-25"}, {"pno": "MBL64820201", "reason": "", "hidden_at": null}];
 
 // 사내생산(협력사에 발주할 필요가 없는 내부 생산 품목)은 대시보드에서 제외.
 // items와 suppliers 목록(드롭다운/검색용) 둘 다에서 제거해야 어디서도 안 보임.
@@ -518,78 +518,117 @@ function switchTab(key) {
   document.getElementById('panel-' + key).classList.add('active');
 }
 
-// ---------- 관리자 모드: 체크박스로 품번 숨기기 ----------
-// 실제로 화면에서 사라지게 하려면 결국 hidden_pnos.json 파일을 고쳐서
-// build_dashboard_all.py를 다시 실행해야 합니다(이 대시보드는 완전히
-// 정적인 HTML이라 서버에 즉시 저장할 방법이 없습니다). 그래서 이 기능은
-// "숨기고 싶은 품번을 체크 → hidden_pnos.json에 붙여넣을 최종 목록을
-// 만들어 클립보드로 복사"까지만 해줍니다. 체크한 목록은 이 브라우저의
-// localStorage에 저장되므로, 다른 사람 화면에는 영향이 없고 새로고침해도
-// 유지됩니다(파일에 실제로 반영하기 전까지의 임시 작업 목록).
-const ADMIN_SELECTION_KEY = 'psiAdminHiddenSelection';
-const ADMIN_MODE_KEY = 'psiAdminModeOn';
-let adminSelection = new Set();
-try {
-  adminSelection = new Set(JSON.parse(localStorage.getItem(ADMIN_SELECTION_KEY) || '[]'));
-} catch (e) { adminSelection = new Set(); }
-
+// ---------- 관리자 모드: 체크박스로 품번 숨기기 (사내망 서버 전용) ----------
+// serve_dashboard.py(사내망 주소)로 접속했을 때만 동작합니다. 체크박스를
+// 누르는 즉시 서버가 (1) hidden_pnos.json을 실제로 고치고 (2) 대시보드를
+// 다시 만들고 (3) GitHub에도 다시 올려서, 관리자 화면과 협력사 화면
+// (GitHub Pages) 양쪽 모두에서 그 품번이 사라지게 만듭니다. GitHub Pages나
+// 파일을 그냥 열었을 때는 이 서버가 없으므로 관리자 모드 버튼 자체를
+// 아예 보여주지 않습니다(협력사에게는 필요 없는 기능이기도 합니다).
 const adminBar = document.getElementById('adminBar');
 const adminModeBtn = document.getElementById('adminModeBtn');
 const adminStatusText = document.getElementById('adminStatusText');
-const adminCopyBtn = document.getElementById('adminCopyBtn');
-const adminResetBtn = document.getElementById('adminResetBtn');
-const adminCopyMsg = document.getElementById('adminCopyMsg');
-const adminExistingCountEl = document.getElementById('adminExistingCount');
-const adminSelectedCountEl = document.getElementById('adminSelectedCount');
+const adminProcessingMsg = document.getElementById('adminProcessingMsg');
+const adminHiddenListBtn = document.getElementById('adminHiddenListBtn');
+const adminHiddenCountEl = document.getElementById('adminHiddenCount');
+const adminHiddenListPanel = document.getElementById('adminHiddenListPanel');
+let adminApiAvailable = false;
 
-function saveAdminSelection() {
-  localStorage.setItem(ADMIN_SELECTION_KEY, JSON.stringify([...adminSelection]));
-  updateAdminBarUI();
+function setAdminBusy(busy, message) {
+  adminProcessingMsg.style.color = busy ? '#e0982a' : '#2ecc71';
+  adminProcessingMsg.textContent = message || '';
+  document.querySelectorAll('.admin-hide-chk').forEach(chk => { chk.disabled = busy; });
 }
 
-function updateAdminBarUI() {
-  const isOn = document.body.classList.contains('admin-mode');
-  adminBar.classList.toggle('on', isOn);
-  adminModeBtn.classList.toggle('on', isOn);
-  adminModeBtn.textContent = isOn ? '🔓 관리자 모드 끄기' : '🔒 관리자 모드 (품번 숨기기)';
-  adminStatusText.style.display = isOn ? '' : 'none';
-  adminCopyBtn.style.display = isOn ? '' : 'none';
-  adminResetBtn.style.display = isOn ? '' : 'none';
-  adminExistingCountEl.textContent = HIDDEN_PNOS.length;
-  adminSelectedCountEl.textContent = adminSelection.size;
+// 체크(또는 숨김 목록에서 '복원' 클릭) → 서버에 요청 → 처리 끝날 때까지
+// 상태를 확인(polling)하다가 끝나면 페이지를 새로고침해서, 방금 숨긴(또는
+// 복원한) 품번이 실제로 반영된 최신 화면을 보여줍니다.
+async function requestHidePno(pno, action, reason, revertUi) {
+  setAdminBusy(true, `⏳ '${pno}' ${action === 'hide' ? '숨김' : '복원'} 처리 중... (완료되면 자동으로 새로고침됩니다)`);
+  try {
+    const res = await fetch('/api/hide-pno', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pno, action, reason }),
+    });
+    if (res.status === 409) {
+      setAdminBusy(false, '⏳ 다른 작업이 진행 중이에요. 잠시 후 다시 시도해주세요.');
+      if (revertUi) revertUi();
+      return;
+    }
+    if (!res.ok) throw new Error('요청 실패');
+    const poll = setInterval(async () => {
+      try {
+        const statusRes = await fetch('/api/status');
+        const statusData = await statusRes.json();
+        if (!statusData.running) {
+          clearInterval(poll);
+          if (statusData.last_result === 'success') {
+            setAdminBusy(false, '✅ 반영 완료! 새로고침할게요.');
+            setTimeout(() => location.reload(), 600);
+          } else {
+            setAdminBusy(false, '⚠️ 처리 중 문제가 생겼어요. PC에서 직접 확인해주세요.');
+            if (revertUi) revertUi();
+          }
+        }
+      } catch (e) {
+        clearInterval(poll);
+        setAdminBusy(false, '🔌 서버와 연결이 끊긴 것 같아요.');
+        if (revertUi) revertUi();
+      }
+    }, 1500);
+  } catch (e) {
+    setAdminBusy(false, '💭 이 기능은 사내망 주소로 접속했을 때만 사용할 수 있어요.');
+    if (revertUi) revertUi();
+  }
+}
+
+async function refreshHiddenList() {
+  try {
+    const res = await fetch('/api/hidden-pnos');
+    const data = await res.json();
+    const list = data.hidden_pnos || [];
+    adminHiddenCountEl.textContent = list.length;
+    if (list.length === 0) {
+      adminHiddenListPanel.innerHTML = '<span style="color:#888;">현재 숨겨진 품번이 없습니다.</span>';
+      return;
+    }
+    // 서버가 예전 형식(단순 문자열)으로 저장된 항목을 아직 갖고 있을 수도
+    // 있으므로, 문자열/객체 둘 다 처리합니다.
+    adminHiddenListPanel.innerHTML = list.map(entry => {
+      const pno = typeof entry === 'string' ? entry : entry.pno;
+      const reason = typeof entry === 'string' ? '' : (entry.reason || '');
+      const hiddenAt = typeof entry === 'string' ? '' : (entry.hidden_at || '');
+      const detail = [reason, hiddenAt].filter(Boolean).join(' · ');
+      return `
+      <span style="display:inline-flex; align-items:center; gap:6px; margin:3px 8px 3px 0; padding:4px 10px; border-radius:999px; background:#f0f1f2; font-size:12px;">
+        <b>${escapeHtml(pno)}</b>${detail ? ` <span style="color:#888;">(${escapeHtml(detail)})</span>` : ''}
+        <button type="button" class="admin-unhide-btn" data-pno="${escapeHtml(pno)}" style="border:none; background:#e74c3c; color:#fff; border-radius:999px; width:16px; height:16px; line-height:16px; text-align:center; cursor:pointer; font-size:11px; padding:0;">✕</button>
+      </span>`;
+    }).join('');
+  } catch (e) {
+    adminHiddenListPanel.innerHTML = '<span style="color:#c0392b;">숨김 목록을 불러오지 못했습니다.</span>';
+  }
 }
 
 function setAdminMode(on) {
   document.body.classList.toggle('admin-mode', on);
-  localStorage.setItem(ADMIN_MODE_KEY, on ? '1' : '0');
-  updateAdminBarUI();
-  // 관리자 모드를 껐다 켰을 때 각 탭의 체크박스 상태를 다시 반영
-  document.querySelectorAll('.admin-hide-chk').forEach(chk => {
-    chk.checked = adminSelection.has(chk.getAttribute('data-pno'));
-  });
+  localStorage.setItem('psiAdminModeOn', on ? '1' : '0');
+  adminBar.classList.toggle('on', on);
+  adminModeBtn.classList.toggle('on', on);
+  adminModeBtn.textContent = on ? '🔓 관리자 모드 끄기' : '🔒 관리자 모드 (품번 숨기기)';
+  adminStatusText.style.display = on ? '' : 'none';
+  adminHiddenListBtn.style.display = on ? '' : 'none';
+  if (!on) adminHiddenListPanel.style.display = 'none';
+  if (on) refreshHiddenList();
 }
 
 adminModeBtn.addEventListener('click', () => setAdminMode(!document.body.classList.contains('admin-mode')));
 
-adminResetBtn.addEventListener('click', () => {
-  if (!confirm('선택한 품번 목록을 초기화할까요? (이미 hidden_pnos.json에 반영된 기존 숨김 목록에는 영향 없습니다)')) return;
-  adminSelection.clear();
-  saveAdminSelection();
-  document.querySelectorAll('.admin-hide-chk').forEach(chk => { chk.checked = false; });
-  adminCopyMsg.textContent = '';
-});
-
-adminCopyBtn.addEventListener('click', async () => {
-  const merged = [...new Set([...HIDDEN_PNOS, ...adminSelection])].sort();
-  const text = JSON.stringify(merged, null, 2);
-  try {
-    await navigator.clipboard.writeText(text);
-    adminCopyMsg.textContent = `✅ ${merged.length}개 품번 목록이 복사됐어요. hidden_pnos.json에 붙여넣고 다시 빌드+배포해주세요.`;
-  } catch (e) {
-    adminCopyMsg.textContent = '⚠ 클립보드 복사에 실패했어요. 아래 내용을 직접 복사해주세요:';
-    window.prompt('아래 내용을 복사해서 hidden_pnos.json에 붙여넣으세요:', text);
-  }
-  setTimeout(() => { adminCopyMsg.textContent = ''; }, 8000);
+adminHiddenListBtn.addEventListener('click', async () => {
+  const willShow = adminHiddenListPanel.style.display === 'none';
+  if (willShow) await refreshHiddenList();
+  adminHiddenListPanel.style.display = willShow ? '' : 'none';
 });
 
 // 체크박스는 각 탭이 렌더링될 때마다 새로 만들어지므로, 이벤트를 document에
@@ -598,16 +637,47 @@ document.addEventListener('click', (e) => {
   if (e.target.classList && e.target.classList.contains('admin-hide-chk')) {
     e.stopPropagation(); // 체크박스를 눌렀을 때 그 행의 차트 열기(row onclick)가 같이 실행되지 않도록
   }
+  if (e.target.classList && e.target.classList.contains('admin-unhide-btn')) {
+    e.stopPropagation();
+    const pno = e.target.getAttribute('data-pno');
+    requestHidePno(pno, 'unhide', '');
+  }
 }, true);
 document.addEventListener('change', (e) => {
   if (e.target.classList && e.target.classList.contains('admin-hide-chk')) {
-    const pno = e.target.getAttribute('data-pno');
-    if (e.target.checked) adminSelection.add(pno); else adminSelection.delete(pno);
-    saveAdminSelection();
+    const chk = e.target;
+    const pno = chk.getAttribute('data-pno');
+    if (chk.checked) {
+      // 숨기는 경우에만 사유를 물어봅니다. 취소를 누르면 체크를 되돌리고
+      // 아무 요청도 보내지 않습니다. 사유는 선택 입력(빈 값도 허용)입니다.
+      const reason = window.prompt(`'${pno}'을(를) 숨기는 사유를 입력해주세요 (특이사항, 선택 입력):`, '');
+      if (reason === null) { chk.checked = false; return; }
+      requestHidePno(pno, 'hide', reason, () => { chk.checked = false; });
+    } else {
+      requestHidePno(pno, 'unhide', '', () => { chk.checked = true; });
+    }
   }
 });
 
-setAdminMode(localStorage.getItem(ADMIN_MODE_KEY) === '1');
+// 페이지가 열리자마자 이 서버(사내망 serve_dashboard.py)가 실제로 응답하는지
+// 조용히 한 번 확인합니다. 응답이 오면(=사내망 주소로 접속한 경우) 관리자
+// 모드 바를 보여주고, 응답이 없으면(=GitHub Pages, 파일로 직접 열기) 계속
+// 숨겨둡니다 - 협력사 등 외부 사람들에게는 아예 안 보이게 하기 위함입니다.
+(async function checkAdminApiAvailable() {
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 1500);
+    const res = await fetch('/api/status', { signal: controller.signal });
+    clearTimeout(timeout);
+    if (res.ok) {
+      adminApiAvailable = true;
+      adminBar.style.display = '';
+      setAdminMode(localStorage.getItem('psiAdminModeOn') === '1');
+    }
+  } catch (e) {
+    // 서버 없음 - 관리자 바는 계속 숨김 상태 유지
+  }
+})();
 
 // 상단 전역 협력사 검색: 입력하면 모든 탭의 검색창에 동시에 반영되어 전부 같이 필터링됨
 const globalSearch = document.getElementById('globalSupplierSearch');
@@ -1005,7 +1075,7 @@ function renderAsmPanel(panel, data, categoryKey) {
     </div>
     <div class="table-scroll">
     <table>
-      <thead><tr><th class="admin-col" title="관리자 모드에서만 보입니다">숨김</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고</th><th>입고 기한</th><th>필요 입고수량</th><th>상태</th></tr></thead>
+      <thead><tr><th class="admin-col" title="관리자 모드에서만 보입니다">숨김</th><th>협력사</th><th>품번</th><th>품명</th><th>현재재고</th><th>입고 기한</th><th>필요 입고수량</th><th>상태</th><th style="text-align:center;">긴급여부</th></tr></thead>
       <tbody class="asm-tbody"></tbody>
     </table>
     </div>
@@ -1106,17 +1176,20 @@ function renderAsmPanel(panel, data, categoryKey) {
         const tr = document.createElement('tr');
         if (isUrgent) tr.style.background = '#fdecea';
         const pnoStr = String(i.pno ?? '');
-        const isChecked = adminSelection.has(pnoStr);
+        // 이미 숨겨진 품번은 데이터 자체가 서버에서 걸러져 이 목록에 아예
+        // 나타나지 않으므로, 화면에 보이는 체크박스는 항상 '체크 안 됨'
+        // 상태로 시작합니다.
         const urgentBadge = isUrgent
-          ? '<span class="badge danger" style="background:#e74c3c;color:#fff;margin-left:4px;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
+          ? '<span class="badge danger" style="background:#e74c3c;color:#fff;white-space:nowrap;">⚠ 긴급(당일 미입고)</span>'
           : '';
         tr.innerHTML = `
-          <td class="admin-col" onclick="event.stopPropagation()"><input type="checkbox" class="admin-hide-chk" data-pno="${escapeHtml(pnoStr)}" ${isChecked ? 'checked' : ''}></td>
+          <td class="admin-col" onclick="event.stopPropagation()"><input type="checkbox" class="admin-hide-chk" data-pno="${escapeHtml(pnoStr)}"></td>
           <td>${escapeHtml(i.supplier)}</td><td>${escapeHtml(i.pno)}</td><td>${escapeHtml(i.name)}</td>
           <td class="${stockClass(i.today_shortage)}">${stockLabel(i.today_shortage)}</td>
           <td class="${statClass}">${dday}</td>
           <td class="${statClass}">${needQty}</td>
-          <td><span class="badge ${st === 'danger' ? 'danger' : st === 'warning' ? 'warning' : st === 'excess' ? 'excess' : st === 'unknown' ? 'unknown' : st === 'discontinued' ? 'discontinued' : 'safe'}">${statLabel}</span>${urgentBadge}</td>`;
+          <td><span class="badge ${st === 'danger' ? 'danger' : st === 'warning' ? 'warning' : st === 'excess' ? 'excess' : st === 'unknown' ? 'unknown' : st === 'discontinued' ? 'discontinued' : 'safe'}">${statLabel}</span></td>
+          <td style="text-align:center;">${urgentBadge}</td>`;
         tr.onclick = () => {
           panel.querySelector('.chart-wrap').style.display = 'block';
           panel.querySelector('.chart-title').textContent = `${i.supplier} · ${i.name} (${i.pno}) 추이`;
