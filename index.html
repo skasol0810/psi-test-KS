@@ -1052,7 +1052,7 @@ function renderTodayNeedPanel(panel) {
     tableWrap.innerHTML = `
       <div class="table-scroll">
       <table>
-        <thead><tr><th>구분</th><th>협력사</th><th style="text-align:center;">긴급여부</th><th>품번</th><th>품명</th><th title="대시보드가 마지막으로 생성된 시각 기준의 실제 과부족(재고) 값입니다. 마이너스면 그만큼 부족하다는 뜻입니다.">현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th><th title="오늘 부족한 수량에, 내일도 부족이 이어질 것으로 예상되면 내일 부족 예상 수량까지 더한 값입니다. 오늘 입고된 물량이 내일 소진에도 쓰이는 구조라, 오늘 한 번에 이만큼 입고해두면 내일 부족까지 함께 해소됩니다.">입고 권장 수량<br><span style="font-weight:400;font-size:11px;color:#888;">(내일분 포함)</span></th></tr></thead>
+        <thead><tr><th>구분</th><th>협력사</th><th style="text-align:center;">긴급여부</th><th>품번</th><th>품명</th><th title="대시보드가 마지막으로 생성된 시각 기준의 실제 과부족(재고) 값입니다. 마이너스면 그만큼 부족하다는 뜻입니다.">현재재고(오늘)</th><th>입고 기한</th><th>선택일 필요 수량</th><th title="오늘+내일 부족 예상분을 합친 값. 이만큼 한 번에 입고하면 내일 부족까지 해소됩니다.">입고 권장 수량<br><span style="font-weight:400;font-size:11px;color:#888;">(내일분 포함)</span></th></tr></thead>
         <tbody class="need-tbody"></tbody>
       </table>
       </div>`;
